@@ -8,6 +8,8 @@ DSH 快速重启插件：在 Web GUI 侧边栏底部加一个「重启」按钮�
 - **设置页「快速重启」卡片**：显示服务 PID、重启按钮与状态提示。
 - **重启方式**：host 插件 detached spawn 一个 helper 脚本，helper 等待当前进程完全退出后，用与当前进程相同的启动参数（`process.execPath + process.execArgv + process.argv.slice(1)`）重新拉起 DSH；当前进程随即优雅退出（launcher 的 bounded shutdown）。新进程的 stdout/stderr 追加写入 `<DSH_HOME>/logs/dsh-quick-restart.log`。
 - **自动恢复**：客户端在确认重启后轮询服务是否恢复，恢复后自动刷新页面。
+- **原生重启页（v0.2.0+）**：确认重启后脱离 React 原生接管页面——旋转动画 + 阶段文案（停止旧进程 → 启动新进程 → 等待就绪）+ 进度条，明暗主题自动适配；多标签页通过 BroadcastChannel 同步进入重启屏；恢复后展示「重启完成」提示。
+- **更稳的恢复判定**：必须观察到服务下线（旧进程确认退出）后再持续在线 8 秒，才判定真正恢复并刷新，避免把退出宽限期内的旧服务误判为已恢复。
 
 ## 前提
 
@@ -26,7 +28,7 @@ DSH 快速重启插件：在 Web GUI 侧边栏底部加一个「重启」按钮�
 {
   "dependencies": {
     // 建议固定版本 tag（不固定则始终拉取默认分支最新提交）
-    "dsh-quick-restart": "github:Noah0509/dsh-quick-restart#v0.1.0"
+    "dsh-quick-restart": "github:Noah0509/dsh-quick-restart#v0.2.0"
   },
   "dsh": {
     "profile": {

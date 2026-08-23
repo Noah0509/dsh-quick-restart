@@ -1,6 +1,6 @@
 {
   "name": "dsh-quick-restart",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 快速重启插件：侧边栏一键重启 DSH 服务进程（确认弹窗 + 原生重启页 + 自动重连）",
   "type": "module",
   "main": "lib/index.js",

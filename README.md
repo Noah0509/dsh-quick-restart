@@ -6,12 +6,33 @@ DSH 快速重启插件：在 Web GUI 侧边栏底部加一个「重启」按钮�
 
 - **侧边栏脚注「重启」按钮**：宽栏显示图标 + 文字，窄栏仅图标；点击后弹确认框，确认后重启服务。
 - **设置页「快速重启」卡片**：显示服务 PID、重启按钮与状态提示。
-- **重启方式**：host 插件 detached spawn 一个 helper 脚本，helper 等待当前进程完全退出后，用与当前进程完全相同的命令（`execPath + execArgv + argv`）重新拉起 DSH；当前进程随即优雅退出（launcher 的 bounded shutdown）。新进程的 stdout/stderr 追加写入 `<DSH_HOME>/logs/dsh-quick-restart.log`。
+- **重启方式**：host 插件 detached spawn 一个 helper 脚本，helper 等待当前进程完全退出后，用与当前进程完全相同的命令（`execArgv + argv`）重新拉起 DSH；当前进程随即优雅退出（launcher 的 bounded shutdown）。新进程的 stdout/stderr 追加写入 `<DSH_HOME>/logs/dsh-quick-restart.log`。
 - **自动恢复**：客户端在确认重启后轮询服务是否恢复，恢复后自动刷新页面。
 
 ## 安装
 
-在 web profile（`~/.dsh/profiles/web`）：
+在 web profile（`~/.dsh/profiles/web`），二选一：
+
+### 从 GitHub 安装
+
+```jsonc
+// package.json
+{
+  "dependencies": {
+    "dsh-quick-restart": "github:Noah0509/dsh-quick-restart"
+  },
+  "dsh": {
+    "profile": {
+      "bundles": [
+        // ... 现有 bundle，
+        "dsh-quick-restart"
+      ]
+    }
+  }
+}
+```
+
+### 本地 link 安装（开发用）
 
 ```jsonc
 // package.json

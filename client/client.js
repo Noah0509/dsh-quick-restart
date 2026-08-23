@@ -22,6 +22,9 @@ window.__ModuleLoader__.load({
       restart: 'server.restart',
       status: 'server.status',
     };
+    // 与 host 端 CONFIRM_TOKEN 一致的确认标记（纵深防御：防止到达 /api
+    // 桥的本机页面在未明确确认的情况下触发重启）
+    var CONFIRM_TOKEN = 'dsh-quick-restart:restart:1';
 
     // 与 dsh-session-manager 一致的官方设计系统变量
     var styles = {
@@ -92,25 +95,32 @@ window.__ModuleLoader__.load({
      * 轮询服务恢复（降级路径：原生重启页构建失败时使用）。
      * 必须先观察到一次连接失败（确认旧进程退出），再等恢复，避免把
      * 退出宽限期内仍在线的旧服务误判为「已恢复」而过早刷新。
+     * 探测走 probeDsh：只认带 __DSH_BOOT__ 的 DSH 页面，避免误连
+     * 恰好占用 3080 端口的其他服务。
      * @param seenDown - 是否已观察到服务下线。
      * @param attempt - 当前尝试次数（从 0 开始）。
      */
     function pollUntilUp(seenDown, attempt) {
-      fetch(window.location.origin + '/', { method: 'GET', cache: 'no-store' })
-        .then(function () {
+      probeDsh(window.location.origin).then(function (up) {
+        if (up) {
           if (!seenDown) { setTimeout(function () { pollUntilUp(false, attempt + 1); }, 200); return; }
           window.location.reload();
-        })
-        .catch(function () {
-          if (attempt > 120) { window.location.reload(); return; }
-          setTimeout(function () { pollUntilUp(true, attempt + 1); }, 1000);
-        });
+          return;
+        }
+        if (attempt > 120) { window.location.reload(); return; }
+        setTimeout(function () { pollUntilUp(true, attempt + 1); }, 1000);
+      });
     }
 
     // 多标签页同步：任一标签发起重启，其余标签同步进入重启屏
     // （BroadcastChannel 不会收到自己发的消息，无需过滤发送者）
     var bc = null;
     try { bc = new BroadcastChannel('dsh-quick-restart'); } catch (e) { /* 不支持则各标签独立 */ }
+    // 防重入：整个页面生命周期内只允许构建一次原生重启屏。多标签场景下
+    // 本标签可能在 A 标签广播到达时已处于重启屏，重复 enterRestartScreen
+    // 会重建 document 并跑出两个轮询循环（旧循环的 giveUp 会覆盖新循环
+    // 的正常 UI）。标志在恢复刷新（页面重新加载）后自然复位。
+    var restartScreenActive = false;
     if (bc) {
       bc.onmessage = function (ev) {
         if (ev && ev.data === 'restarting') enterRestartScreen();
@@ -119,6 +129,24 @@ window.__ModuleLoader__.load({
     var broadcastRestart = function () {
       try { if (bc) bc.postMessage('restarting'); } catch (e) { /* 广播失败不影响本标签 */ }
     };
+
+    /**
+     * DSH 特有存活探测：确认响应的首页是 DSH 页面而非「恰好占用 3080 的
+     * 其他服务」。DSH index 由宿主注入 window.__DSH_BOOT__ 启动图，检查该
+     * 标记即可区分；旧进程退出宽限期内旧服务仍可能短暂应答，配合
+     * runRestartPoll 的「先观察到下线再连续在线」判定避免误判。
+     * @returns Promise<boolean> 是否探测到真正的 DSH 页面。
+     */
+    function probeDsh(origin) {
+      var opts = { method: 'GET', cache: 'no-store' };
+      if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
+        opts.signal = AbortSignal.timeout(1500);
+      }
+      return fetch(origin + '/', opts)
+        .then(function (res) { return res.text(); })
+        .then(function (html) { return html.indexOf('__DSH_BOOT__') !== -1; })
+        .catch(function () { return false; });
+    }
 
     /** 读取当前页面底色并判断明暗，让重启页与应用主题一致。 */
     function readTheme() {
@@ -144,6 +172,9 @@ window.__ModuleLoader__.load({
      * - 标签页标题同步显示「⟳ 重启中…」。
      */
     function enterRestartScreen() {
+      // 防重入：已处于重启屏则忽略（多标签广播/重复点击场景）
+      if (restartScreenActive) return;
+      restartScreenActive = true;
       try {
         var theme = readTheme();
         var sub = theme.dark ? '#9ca3af' : '#6b7280';
@@ -211,16 +242,12 @@ window.__ModuleLoader__.load({
       var STABLE_MS = 8000;
 
       var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
-      // 实测：启动早期存在「TCP 已连但 HTTP 不响应」的静默阶段，
-      // fetch 不带超时会挂在静默 socket 上，轮询停摆，必须加超时。
+      // 探测走 probeDsh：只认带 __DSH_BOOT__ 的 DSH 页面，避免把恰好
+      // 占用 3080 的其他服务误判为「DSH 已恢复」。实测启动早期存在
+      // 「TCP 已连但 HTTP 不响应」的静默阶段，probeDsh 内部已带超时，
+      // 不会让轮询停摆。
       var probe = function () {
-        var opts = { method: 'GET', cache: 'no-store' };
-        if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) {
-          opts.signal = AbortSignal.timeout(1500);
-        }
-        return fetch(origin + '/', opts)
-          .then(function () { return true; })
-          .catch(function () { return false; });
+        return probeDsh(origin);
       };
       var setPhase = function (text) { els.phase.textContent = text; };
 
@@ -326,7 +353,7 @@ window.__ModuleLoader__.load({
       var confirm = useCallback(function () {
         setPhase('restarting');
         setNotice(null);
-        rpcCall(E.restart, {}).then(function (res) {
+        rpcCall(E.restart, { confirm: CONFIRM_TOKEN }).then(function (res) {
           if (res && res.ok === false) {
             // 服务端明确拒绝（进程仍在运行）：保留页面并提示
             setPhase('error');

@@ -1,0 +1,5 @@
+# dsh-quick-restart bundle patch（dsh.bundle manifest 要求的加载配置）
+# 单包单插件：侧边栏脚注「重启」按钮 + 设置页「服务」卡片。
+- insert:
+    - id: dsh-quick-restart
+      name: dsh-quick-restart

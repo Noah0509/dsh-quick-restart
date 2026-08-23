@@ -1,0 +1,33 @@
+{
+  "name": "dsh-quick-restart",
+  "version": "0.1.0",
+  "description": "DSH 快速重启插件：侧边栏一键重启 DSH 服务进程（确认弹窗 + 自动重连）",
+  "type": "module",
+  "main": "lib/index.js",
+  "files": [
+    "lib",
+    "client",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": "./client/client.js",
+    "./package.json": "./package.json"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  }
+}

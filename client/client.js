@@ -1,7 +1,10 @@
 // dsh-quick-restart 网页客户端
 //   - 侧边栏脚注「重启」按钮（宽栏文字 + 图标，窄栏仅图标）
-//   - 设置页「快速重启」卡片（服务状态 + 重启按钮）
+//   - 设置页「快速重启」卡片（服务状态 + 日志路径 + 重启按钮）
 //   - 重启中原生接管页面：旋转动画 + 阶段文案 + 进度条，恢复后自动刷新
+//   - 进度条与「比预期慢」提示按上次重启的实际耗自适应（localStorage）
+//   - 刷新安全：重启期间误刷新/重开页面，恢复后自动展示「重启完成」
+//   - 失败时在重启页展示日志路径并支持一键复制
 // 手写 CommonJS + React.createElement，无需构建步骤：
 // 直接以 window.__ModuleLoader__.load({ id, factory }) 注册，
 // 与 dsh-session-manager 的客户端使用同一套加载协议。
@@ -25,6 +28,29 @@ window.__ModuleLoader__.load({
     // 与 host 端 CONFIRM_TOKEN 一致的确认标记（纵深防御：防止到达 /api
     // 桥的本机页面在未明确确认的情况下触发重启）
     var CONFIRM_TOKEN = 'dsh-quick-restart:restart:1';
+
+    // ---- localStorage 持久化（隐私模式等异常全部静默降级）----
+    var LS_LAST_MS = 'dqr-last-restart-ms'; // 上次重启实际总耗时（毫秒）
+    var LS_INFO = 'dqr-restart-info';       // 重启进行中标记 { startedAt, logPath }
+
+    function lsGet(key) {
+      try { var raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+    }
+    function lsSet(key, val) {
+      try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { /* 不可用则跳过 */ }
+    }
+    function lsDel(key) {
+      try { localStorage.removeItem(key); } catch (e) { /* 不可用则跳过 */ }
+    }
+
+    /** 预期重启耗时（毫秒）：优先用上次实际耗时，无记录时保守默认 90 秒。 */
+    function getExpectedMs() {
+      var v = lsGet(LS_LAST_MS);
+      return (typeof v === 'number' && v > 0 && v < 600000) ? v : 90000;
+    }
+
+    /** 最近一次 status 查询带回的日志路径（重启失败时引导排查用）。 */
+    var lastKnownLogPath = '';
 
     // 与 dsh-session-manager 一致的官方设计系统变量
     var styles = {
@@ -63,14 +89,23 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** 确认弹窗。 */
+    /** 确认弹窗：Esc 关闭 + 自动聚焦「取消」（危险操作不默认聚焦确认）。 */
     function ConfirmDialog(props) {
+      useEffect(function () {
+        var onKey = function (e) { if (e.key === 'Escape') props.onCancel(); };
+        document.addEventListener('keydown', onKey);
+        return function () { document.removeEventListener('keydown', onKey); };
+      }, [props.onCancel]);
       return h('div', { style: styles.overlay, onClick: props.onCancel },
         h('div', { style: styles.dialog, onClick: function (e) { e.stopPropagation(); } },
           h('div', { style: styles.dialogTitle }, props.title),
           h('div', { style: styles.dialogBody }, props.body),
           h('div', { style: styles.dialogActions },
-            h('button', { style: styles.btn, onClick: props.onCancel }, '取消'),
+            h('button', {
+              style: styles.btn,
+              onClick: props.onCancel,
+              ref: function (el) { if (el && el.focus) el.focus(); },
+            }, '取消'),
             h('button', {
               style: Object.assign({}, styles.btn, styles.btnDanger),
               disabled: !!props.busy,
@@ -169,12 +204,16 @@ window.__ModuleLoader__.load({
      * - 旋转动画 + 阶段文案（停止旧进程 → 启动新进程 → 等待就绪）+ 进度条；
      * - 旧文档连同应用样式一起移除，框架断连遮罩无法再干扰此页面；
      * - 恢复后带 restarted=1 刷新，页面加载完展示「重启完成」提示；
-     * - 标签页标题同步显示「⟳ 重启中…」。
+     * - 标签页标题同步显示「⟳ 重启中…」；
+     * - 进入时向 localStorage 写重启标记（含日志路径）：重启期间误刷新或
+     *   重开页面，恢复后由 handlePageLoad 兜底展示「重启完成」。
      */
     function enterRestartScreen() {
       // 防重入：已处于重启屏则忽略（多标签广播/重复点击场景）
       if (restartScreenActive) return;
       restartScreenActive = true;
+      // 重启标记：多标签场景下后进屏的标签会刷新时间戳（顺带延长兜底窗口）
+      lsSet(LS_INFO, { startedAt: Date.now(), logPath: lastKnownLogPath });
       try {
         var theme = readTheme();
         var sub = theme.dark ? '#9ca3af' : '#6b7280';
@@ -189,6 +228,7 @@ window.__ModuleLoader__.load({
           '.dqr-track { width: 220px; height: 6px; border-radius: 999px; background: ' + track + '; overflow: hidden; }',
           '.dqr-bar { height: 100%; width: 0%; border-radius: 999px; background: #4f6ef7; transition: width .3s ease; }',
           '.dqr-btn { display: none; margin-top: 4px; font: inherit; font-size: 13px; cursor: pointer; height: 30px; padding: 0 16px; border-radius: 999px; background: transparent; }',
+          '.dqr-log { display: none; font-size: 12px; max-width: 460px; word-break: break-all; }',
         ].join('\n');
         // 清空旧文档（应用样式与脚本一并移除），原生重建
         var rootEl = document.documentElement;
@@ -210,7 +250,9 @@ window.__ModuleLoader__.load({
           '<div class="dqr-sub" id="dqr-phase" aria-live="polite" style="color:' + sub + '">正在停止旧进程…</div>' +
           '<div class="dqr-track"><div class="dqr-bar" id="dqr-bar"></div></div>' +
           '<div class="dqr-sub" id="dqr-elapsed" style="color:' + sub + '"></div>' +
-          '<button type="button" class="dqr-btn" id="dqr-btn" style="border:1px solid ' + border + '">刷新页面</button>';
+          '<button type="button" class="dqr-btn" id="dqr-btn" style="border:1px solid ' + border + '">刷新页面</button>' +
+          '<div class="dqr-log" id="dqr-log" style="color:' + sub + '"></div>' +
+          '<button type="button" class="dqr-btn" id="dqr-copy" style="border:1px solid ' + border + '">复制日志路径</button>';
         rootEl.appendChild(headEl);
         rootEl.appendChild(bodyEl);
         runRestartPoll(window.location.origin, {
@@ -219,6 +261,11 @@ window.__ModuleLoader__.load({
           bar: document.getElementById('dqr-bar'),
           elapsed: document.getElementById('dqr-elapsed'),
           btn: document.getElementById('dqr-btn'),
+          log: document.getElementById('dqr-log'),
+          copy: document.getElementById('dqr-copy'),
+        }, {
+          expectedMs: getExpectedMs(),
+          logPath: lastKnownLogPath,
         });
       } catch (e) {
         // 原生页构建失败（几乎不可能）：退回简单轮询刷新
@@ -230,8 +277,14 @@ window.__ModuleLoader__.load({
      * 重启页轮询状态机：stopping（等服务下线）→ starting（等服务恢复）→ up。
      * 必须先观察到一次连接失败，才能确认旧进程真的退出，避免把退出
      * 宽限期内仍在线的旧服务误判为「已恢复」而过早刷新页面。
+     * 进度条与「比预期慢」提示基于历史耗时（opts.expectedMs）自适应；
+     * 总预算 = max(180s, 预期×2)，上限 300 秒（慢机器冷启动保护）。
      */
-    function runRestartPoll(origin, els) {
+    function runRestartPoll(origin, els, opts) {
+      var expectedMs = (opts && opts.expectedMs) || 90000;
+      var logPath = (opts && opts.logPath) || '';
+      var expSec = expectedMs / 1000;
+      var budgetMs = Math.min(300000, Math.max(180000, expectedMs * 2));
       var start = Date.now();
       var downAt = 0; // 首次探测到服务下线的时刻
       var upSince = 0; // 本轮连续在线的起点（0 = 当前离线）
@@ -254,6 +307,8 @@ window.__ModuleLoader__.load({
       var finish = function () {
         stopped = true;
         clearInterval(ui);
+        // 记录本次实际耗时：下次重启的进度条与「比预期慢」阈值以此为准
+        lsSet(LS_LAST_MS, Date.now() - start);
         setPhase('重启完成，正在刷新页面…');
         els.bar.style.width = '100%';
         setTimeout(function () {
@@ -269,6 +324,8 @@ window.__ModuleLoader__.load({
       var giveUp = function (kind) {
         stopped = true;
         clearInterval(ui);
+        // 重启流程已终止：清除标记，避免恢复后误报「重启完成」
+        lsDel(LS_INFO);
         els.spin.style.display = 'none';
         els.phase.style.color = '#dc2626';
         if (kind === 'not-sent') {
@@ -279,18 +336,33 @@ window.__ModuleLoader__.load({
             ? '服务长时间未恢复，请手动刷新或稍后重试。'
             : '服务持续在线，本次重启可能未生效。');
         }
+        // 排查引导：给出日志路径（host 端 status 提供），可一键复制
+        if (logPath) {
+          els.log.textContent = '排查日志：' + logPath;
+          els.copy.style.display = 'inline-flex';
+          els.copy.onclick = function () {
+            var done = function () { els.copy.textContent = '已复制'; };
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(logPath).then(done, done);
+            } else { done(); }
+          };
+        } else {
+          els.log.textContent = '若持续失败，可查看 DSH 日志目录（<DSH_HOME>/logs）下的 dsh-quick-restart.log。';
+        }
+        els.log.style.display = 'block';
         els.btn.style.display = 'inline-flex';
         els.btn.onclick = function () { window.location.reload(); };
       };
 
-      // UI 心跳：计时 + 进度条（前 30 秒推进到 80%，之后悬停等真实恢复）
+      // UI 心跳：计时 + 进度条（预期时长内走到 85%，之后缓慢爬向 95%）
       ui = setInterval(function () {
         if (stopped) return;
         var el = (Date.now() - start) / 1000;
-        els.elapsed.textContent = el > 30
+        els.elapsed.textContent = el > expSec * 1.3
           ? '已等待 ' + Math.floor(el) + ' 秒 · 比预期慢，仍在等待服务就绪…'
           : '已等待 ' + Math.floor(el) + ' 秒';
-        els.bar.style.width = Math.min(80, (el / 30) * 80).toFixed(1) + '%';
+        var width = el <= expSec ? (el / expSec) * 85 : 85 + Math.min(10, (el - expSec) * 0.2);
+        els.bar.style.width = width.toFixed(1) + '%';
         if (state === 'starting') {
           if (upSince) setPhase('服务已恢复，正在确认连接稳定…');
           else setPhase((Date.now() - downAt) < 1500 ? '正在启动新进程…' : '等待服务就绪…');
@@ -298,7 +370,7 @@ window.__ModuleLoader__.load({
       }, 250);
 
       (async function loop() {
-        while (!stopped && Date.now() - start < 180000) {
+        while (!stopped && Date.now() - start < budgetMs) {
           var up = await probe();
           if (state === 'stopping') {
             // 服务迟迟未下线：重启请求多半没送达，别让用户白等
@@ -323,20 +395,49 @@ window.__ModuleLoader__.load({
       })();
     }
 
-    /** 重启完成提示：带 restarted=1 的刷新完成后展示 toast 并清理 URL。 */
+    /** 展示「重启完成」toast（有历史耗时记录时附带本次耗时）。 */
     function showRestartedToast() {
       try {
-        var url = new URL(window.location.href);
-        if (url.searchParams.get('restarted') !== '1') return;
-        url.searchParams.delete('restarted');
-        window.history.replaceState(null, '', url.href);
+        var lastMs = lsGet(LS_LAST_MS);
+        var text = (typeof lastMs === 'number' && lastMs > 0)
+          ? '重启完成 · 耗时 ' + Math.round(lastMs / 1000) + ' 秒'
+          : '重启完成';
         var toast = document.createElement('div');
-        toast.textContent = '重启完成';
+        toast.textContent = text;
         toast.setAttribute('style', 'position:fixed;left:50%;transform:translateX(-50%);bottom:28px;z-index:10000;padding:8px 16px;border-radius:999px;font-size:13px;background:var(--dsw-alias-state-success-soft,#e7f6ec);color:var(--dsw-alias-state-success-primary,#16a34a);box-shadow:0 4px 14px rgba(0,0,0,.12);transition:opacity .4s;opacity:1');
         document.body.appendChild(toast);
         setTimeout(function () { toast.style.opacity = '0'; }, 2600);
         setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 3100);
       } catch (e) { /* 提示失败不影响功能 */ }
+    }
+
+    /**
+     * 页面加载入口（刷新安全）：
+     * - 带 restarted=1：清理参数 + toast「重启完成」；
+     * - 无参数但存在未过期的重启标记：说明用户在重启期间刷新/重开了页面，
+     *   而页面能加载成功即证明服务已恢复——清理标记并同样 toast，
+     *   避免用户落入「断连困惑」（重启屏期间刷新会得到浏览器错误页，
+     *   恢复后再刷新/重开才走到这里）；
+     * - 标记超过 5 分钟视为陈旧，直接清除、不打扰。
+     */
+    function handlePageLoad() {
+      var restarted = false;
+      try {
+        var url = new URL(window.location.href);
+        restarted = url.searchParams.get('restarted') === '1';
+        if (restarted) {
+          url.searchParams.delete('restarted');
+          window.history.replaceState(null, '', url.href);
+        }
+      } catch (e) { restarted = false; }
+      var info = lsGet(LS_INFO);
+      if (info) {
+        var fresh = typeof info.startedAt === 'number' && (Date.now() - info.startedAt) < 300000;
+        lsDel(LS_INFO);
+        if (fresh || restarted) showRestartedToast();
+        return;
+      }
+      if (restarted) showRestartedToast();
     }
 
     /** 共享的重启状态机（侧边栏按钮与设置卡片复用）。 */
@@ -348,7 +449,14 @@ window.__ModuleLoader__.load({
       var notice = noticeState[0];
       var setNotice = noticeState[1];
 
-      var start = useCallback(function () { setNotice(null); setPhase('confirm'); }, []);
+      var start = useCallback(function () {
+        setNotice(null); setPhase('confirm');
+        // 打开弹窗时顺带预取日志路径（服务在线，秒回）：重启失败时
+        // 重启页要用它做排查引导；此时不取，退出后就查不到了
+        rpcCall(E.status, {}).then(function (res) {
+          if (res && res.ok && res.value && res.value.logPath) lastKnownLogPath = String(res.value.logPath);
+        }).catch(function () { /* 预取失败不阻塞确认流程 */ });
+      }, [rpcCall]);
       var cancel = useCallback(function () { setPhase('idle'); }, []);
       var confirm = useCallback(function () {
         setPhase('restarting');
@@ -414,6 +522,8 @@ window.__ModuleLoader__.load({
         props.rpcCall(E.status, {}).then(function (res) {
           if (!res || !res.ok) return;
           setStatus(res.value);
+          // 顺带缓存日志路径：从此处发起的重启也能在失败时给出排查引导
+          if (res.value && res.value.logPath) lastKnownLogPath = String(res.value.logPath);
         }).catch(function () { /* 状态读取失败忽略 */ });
       }, [props.rpcCall]);
 
@@ -425,6 +535,7 @@ window.__ModuleLoader__.load({
         status !== null ? h('div', { style: styles.metaBox },
           'PID：' + String(status.pid || ''),
           status.restarting ? h('div', { style: Object.assign({}, styles.notice, styles.noticeOk) }, '重启已在进行中…') : null,
+          status.logPath ? h('div', { title: status.logPath }, '日志：' + String(status.logPath)) : null,
         ) : null,
         flow.notice ? h('div', {
           style: Object.assign({}, styles.notice, flow.phase === 'error' ? styles.noticeError : styles.noticeOk),
@@ -476,11 +587,11 @@ window.__ModuleLoader__.load({
       });
     }
 
-    // 页面加载时检查 restarted 标记：清理 URL 并展示「重启完成」toast
+    // 页面加载入口：清理 restarted 参数 / 重启标记，必要时展示「重启完成」toast
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', showRestartedToast);
+      document.addEventListener('DOMContentLoaded', handlePageLoad);
     } else {
-      showRestartedToast();
+      handlePageLoad();
     }
 
     module.exports = { name: 'dsh-quick-restart', inject: ['slots', 'connection'], apply };

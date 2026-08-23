@@ -1,4 +1,4 @@
-# dsh-quick-restart 发布脚本
+﻿# dsh-quick-restart 发布脚本
 #
 # 用法:
 #   powershell -ExecutionPolicy Bypass -File .\release.ps1 0.3.0
